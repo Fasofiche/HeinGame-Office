@@ -1719,10 +1719,22 @@ function saveLocal(){
     const gameImages = Object.fromEntries(games.filter(g=>g.img).map(g=>[g.id, g.img]));
     const consoleImages = {};
     consoles.forEach(b=> b.models.forEach(m=>{ if(m.img) consoleImages[m.id] = m.img; }));
+
+    // IMPORTANT : on sauvegarde aussi le catalogue des jeux.
+    // Avant cette correction, seul g.img était mémorisé. Un jeu créé dans
+    // l'admin disparaissait au rechargement, donc son image devenait orpheline.
+    const gamesCatalog = games.map(g=>({
+      id:g.id, name:g.name, platform:g.platform, cat:g.cat,
+      price:g.price, desc:g.desc || '', stock:Array.isArray(g.stock) ? g.stock : [],
+      img:g.img || ''
+    }));
+
     localStorage.setItem('hiengame_data', JSON.stringify({
       adminPassword: state.adminPassword,
       theme: state.theme,
       packRule: state.packRule,
+      gamesCatalog,
+      deletedGameIds: Array.from(window.hgDeletedGameIds || []),
       gameImages, consoleImages,
       gamePrices: Object.fromEntries(games.map(g=>[g.id,g.price])),
       packPrices: Object.fromEntries(packs.map(p=>[p.id,p.price])),
@@ -1736,8 +1748,44 @@ function loadLocal(){
     const raw = localStorage.getItem('hiengame_data');
     if(!raw) return;
     const data = JSON.parse(raw);
-    // Le mot de passe admin est désormais fixe (ADMIN_SECRET_PASSWORD) : on ignore volontairement
-    // toute ancienne valeur qui aurait pu être enregistrée dans ce navigateur avant cette mise à jour.
+
+    // Jeux supprimés volontairement : ils ne doivent pas réapparaître au prochain chargement.
+    window.hgDeletedGameIds = new Set(Array.isArray(data.deletedGameIds) ? data.deletedGameIds : []);
+    if(window.hgDeletedGameIds.size){
+      games = games.filter(g=>!window.hgDeletedGameIds.has(g.id));
+    }
+
+    // Restaure les jeux existants et recrée les jeux ajoutés depuis l'admin.
+    // On conserve les nouveaux jeux intégrés au code même s'ils n'existaient pas
+    // dans une ancienne sauvegarde localStorage.
+    if(Array.isArray(data.gamesCatalog)){
+      data.gamesCatalog.forEach(saved=>{
+        if(!saved || !saved.id || window.hgDeletedGameIds.has(saved.id)) return;
+        const current = games.find(g=>g.id===saved.id);
+        if(current){
+          current.name = saved.name ?? current.name;
+          current.platform = saved.platform ?? current.platform;
+          current.cat = saved.cat ?? current.cat;
+          current.price = saved.price ?? current.price;
+          current.desc = saved.desc ?? current.desc;
+          current.stock = Array.isArray(saved.stock) ? saved.stock : current.stock;
+          if(saved.img) current.img = saved.img;
+        }else{
+          games.push({
+            id:saved.id,
+            name:saved.name || 'Jeu',
+            platform:saved.platform || 'PS4',
+            cat:saved.cat || 'Divers',
+            price:Number(saved.price)||0,
+            desc:saved.desc || '',
+            stock:Array.isArray(saved.stock) ? saved.stock : [],
+            img:saved.img || ''
+          });
+        }
+      });
+    }
+
+    // Compatibilité avec les anciennes sauvegardes qui ne contenaient que les images.
     if(data.packRule) state.packRule = data.packRule;
     if(data.theme) Object.assign(state.theme, data.theme);
     if(data.gameImages) games.forEach(g=>{ if(data.gameImages[g.id]) g.img = data.gameImages[g.id]; });
@@ -1745,8 +1793,6 @@ function loadLocal(){
     if(data.gamePrices) games.forEach(g=>{ if(data.gamePrices[g.id]!=null) g.price = data.gamePrices[g.id]; });
     if(data.packPrices) packs.forEach(p=>{ if(data.packPrices[p.id]!=null) p.price = data.packPrices[p.id]; });
     if(data.priceOverrides) priceOverrides = data.priceOverrides;
-    // Le numéro WhatsApp est désormais fixé dans le code (ADMIN_WA_NUMBER) : on ignore
-    // volontairement toute ancienne valeur mise en cache dans ce navigateur avant cette mise à jour.
   } catch(e){ /* premier lancement ou stockage indisponible */ }
 }
 function applyTheme(){
@@ -2278,9 +2324,12 @@ function adminCreateGame(){
   const cat = document.getElementById('newGameCat').value.trim() || 'Divers';
   const price = parseInt(document.getElementById('newGamePrice').value) || 0;
   if(!name || !price){ toast('Renseignez au moins un nom et un prix.', 'err'); return; }
-  const id = 'g'+(games.length+1)+Math.random().toString(36).slice(2,4);
-  games.push({id, name, platform, cat, price, desc:'Description à compléter.', stock:[]});
+  const id = 'g'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+  games.push({id, name, platform, cat, price, desc:'Description à compléter.', stock:[], img:''});
+  window.hgDeletedGameIds?.delete(id);
   document.getElementById('newGameName').value=''; document.getElementById('newGameCat').value=''; document.getElementById('newGamePrice').value='';
+  // Le jeu doit exister après actualisation AVANT même qu'une image lui soit associée.
+  saveLocal();
   toast(`"${name}" créé sans stock ni image — à compléter.`);
   renderAll();
 }
@@ -2361,6 +2410,17 @@ function adminPreviewRawGameImage(){
   const safeUrl=url.replace(/"/g,'&quot;');
   preview.style.display='block';
   preview.innerHTML=`<div style="display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--border);border-radius:10px"><img src="${safeUrl}" alt="Aperçu" style="width:58px;height:78px;object-fit:cover;border-radius:7px;background:var(--surface-2)" onerror="this.style.opacity='.35'"><span style="font-size:11.5px;color:var(--text-dim);word-break:break-all">Aperçu de l'image RAW</span></div>`;
+}
+function adminDeleteGame(gid){
+  const g = games.find(x=>x.id===gid);
+  if(!g) return;
+  if(!confirm(`Supprimer définitivement « ${g.name} » du catalogue et son image associée ?`)) return;
+  games = games.filter(x=>x.id!==gid);
+  if(!window.hgDeletedGameIds) window.hgDeletedGameIds = new Set();
+  window.hgDeletedGameIds.add(gid);
+  saveLocal();
+  renderAll();
+  toast(`« ${g.name} » a été supprimé du catalogue.`);
 }
 function adminSetGameImage(){
   const gid = document.getElementById('mediaGameId').value || document.getElementById('mediaGameSelect').value;
@@ -2592,7 +2652,10 @@ function renderAdmin(){
     const avail = availableStockCount(g);
     return `<tr><td>${g.name}</td><td>${g.platform}</td><td>${g.cat}</td><td>${g.price.toLocaleString('fr-FR')} FCFA</td>
       <td>${avail} dispo / ${g.stock.length}</td>
-      <td><span class="status-pill ${avail>0?'ok':'pending'}">${avail>0?'Publié':'Stock requis'}</span></td></tr>`;
+      <td>
+        <span class="status-pill ${avail>0?'ok':'pending'}">${avail>0?'Publié':'Stock requis'}</span>
+        <button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="adminDeleteGame('${g.id}')">Supprimer</button>
+      </td></tr>`;
   }).join('');
 
   document.getElementById('stockGameSelect').innerHTML = games.map(g=>`<option value="${g.id}">${g.name} (${g.platform})</option>`).join('');
