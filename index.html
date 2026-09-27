@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-<meta name="google-site-verification" content="A7V0_1NYO5FP-PZpGFl983kMScfGxG1NMN0Y41HXTzM" />
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>HienGame — Votre univers gaming</title>
@@ -1714,11 +1713,27 @@ function getEffectivePrice(id, basePrice){
 /* ==================================================================
    PERSISTANCE LOCALE (propre à cet appareil/navigateur)
 ================================================================== */
+// Une image "RAW" collée par l'admin est une URL http(s) (ex: raw.githubusercontent.com/...).
+// Les visuels par défaut du site (icône Orange Money, photos de consoles) sont eux encodés
+// en base64 ("data:image/...") directement dans le code : ils sont déjà là à chaque chargement
+// et n'ont donc pas besoin d'être recopiés dans le stockage local.
+function isRawImageUrl(url){
+  return typeof url === 'string' && /^https?:\/\//i.test(url);
+}
 function saveLocal(){
   try{
-    const gameImages = Object.fromEntries(games.filter(g=>g.img).map(g=>[g.id, g.img]));
+    // IMPORTANT — CORRECTION DU BUG "l'image disparaît après rechargement" :
+    // avant, on réécrivait ICI, à CHAQUE sauvegarde, absolument toutes les images en mémoire,
+    // y compris les visuels par défaut encodés en base64 (plusieurs centaines de Ko chacun).
+    // Résultat : le paquet à sauvegarder dépassait largement les ~5 Mo que le navigateur
+    // autorise pour le stockage local d'un site. localStorage.setItem() levait alors une
+    // erreur "quota dépassé" — silencieusement avalée par le catch ci-dessous — et RIEN
+    // n'était jamais réellement enregistré, même l'image RAW que tu venais d'associer.
+    // On ne garde donc désormais que les vraies URL RAW (http/https) ajoutées depuis l'admin ;
+    // les visuels par défaut restent gérés par le code et n'ont pas besoin d'être dupliqués ici.
+    const gameImages = Object.fromEntries(games.filter(g=>isRawImageUrl(g.img)).map(g=>[g.id, g.img]));
     const consoleImages = {};
-    consoles.forEach(b=> b.models.forEach(m=>{ if(m.img) consoleImages[m.id] = m.img; }));
+    consoles.forEach(b=> b.models.forEach(m=>{ if(isRawImageUrl(m.img)) consoleImages[m.id] = m.img; }));
 
     // IMPORTANT : on sauvegarde aussi le catalogue des jeux.
     // Avant cette correction, seul g.img était mémorisé. Un jeu créé dans
@@ -1726,7 +1741,7 @@ function saveLocal(){
     const gamesCatalog = games.map(g=>({
       id:g.id, name:g.name, platform:g.platform, cat:g.cat,
       price:g.price, desc:g.desc || '', stock:Array.isArray(g.stock) ? g.stock : [],
-      img:g.img || ''
+      img: isRawImageUrl(g.img) ? g.img : ''
     }));
 
     localStorage.setItem('hiengame_data', JSON.stringify({
@@ -1741,7 +1756,15 @@ function saveLocal(){
       priceOverrides,
       waNumber: document.getElementById('waNumber')?.value,
     }));
-  } catch(e){ /* stockage indisponible — on continue sans bloquer l'admin */ }
+  } catch(e){
+    // On ne masque plus l'échec : si malgré tout le stockage refuse d'enregistrer
+    // (navigateur en navigation privée, quota vraiment saturé, etc.), l'admin est prévenu
+    // au lieu de croire — à tort — que tout est sauvegardé.
+    console.error('saveLocal a échoué :', e);
+    if (typeof toast === 'function') {
+      toast("Échec de l'enregistrement local (stockage plein ou indisponible) — ré-essaie ou vide le stockage du site.", 'err');
+    }
+  }
 }
 function loadLocal(){
   try{
